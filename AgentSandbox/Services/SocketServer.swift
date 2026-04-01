@@ -92,7 +92,9 @@ class SocketServer: @unchecked Sendable {
     func stop() {
         isRunning = false
         isReady = false
+        // 关闭监听 fd 前先发送 shutdown，防止 accept() 永远阻塞
         if serverFd >= 0 {
+            shutdown(serverFd, SHUT_RDWR)
             close(serverFd)
             serverFd = -1
         }

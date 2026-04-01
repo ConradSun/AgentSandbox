@@ -48,6 +48,10 @@ class LogViewModel: ObservableObject {
         if logs.count > 5000 {
             logs.removeFirst(logs.count - 5000)
         }
+        // 缓存未命中时异步查询进程名
+        if processNameCache[log.processId] == nil {
+            fetchProcessName(pid: log.processId)
+        }
     }
 
     /// 清空所有日志
@@ -61,43 +65,45 @@ class LogViewModel: ObservableObject {
     func getProcessName(pid: Int32) -> String {
         if let cached = processNameCache[pid] { return cached }
 
-        let name: String
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == pid }) {
-            name = app.localizedName ?? "pid:\(pid)"
-        } else {
-            name = getProcessNameFromPS(pid: pid)
+            let name = app.localizedName ?? "pid:\(pid)"
+            processNameCache[pid] = name
+            return name
         }
 
-        processNameCache[pid] = name
-        return name
+        // 已不在 runningApps 中，返回 pid 占位，下次查询用 ps 重试
+        return "pid:\(pid)"
     }
 
-    /// 通过 ps 命令获取进程名
+    /// 通过 ps 命令异步获取进程名并缓存
     /// - Parameter pid: 进程 ID
-    /// - Returns: 进程名称
-    private func getProcessNameFromPS(pid: Int32) -> String {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/ps")
-        task.arguments = ["-p", "\(pid)", "-o", "comm="]
+    func fetchProcessName(pid: Int32) {
+        // 已在缓存或已在查询中，跳过
+        if processNameCache[pid] != nil { return }
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
+        Task.detached(priority: .utility) { [weak self] in
+            let name: String
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/ps")
+            task.arguments = ["-p", "\(pid)", "-o", "comm="]
 
-        do {
-            try task.run()
+            let outputPipe = Pipe()
+            task.standardOutput = outputPipe
+            task.standardError = FileHandle.nullDevice
 
-            /* 在后台线程读取输出，避免管道阻塞 */
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outputData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            do {
+                try task.run()
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                name = output.isEmpty ? "pid:\(pid)" : output
+            } catch {
+                name = "pid:\(pid)"
+            }
 
-            task.waitUntilExit()
-
-            return output.isEmpty ? "pid:\(pid)" : output
-        } catch {
-            return "pid:\(pid)"
+            await MainActor.run {
+                self?.processNameCache[pid] = name
+            }
         }
     }
 }

@@ -173,45 +173,46 @@ class BinaryRepack {
     ///   - is64bit: 是否为 64 位
     /// - Returns: 是否成功注入
     private func injectDylib(header: mach_header, offset: UInt64, is64bit: Bool) -> Bool {
-        guard let fileHandle = FileHandle(forWritingAtPath: binaryPath) else {
-            Logger(.error, "Failed to create handler for binary file")
-            return false
-        }
-        
         let pathSize = (dylibPath.count & ~(pathPadding - 1)) + pathPadding
         let cmdSize = MemoryLayout<dylib_command>.size + pathSize
-        var cmdOffset: UInt64 = 0
-        var dylibCmd = dylib_command()
-        
-        if is64bit {
-            cmdOffset = offset + UInt64(MemoryLayout<mach_header_64>.size)
-        } else {
-            cmdOffset = offset + UInt64(MemoryLayout<mach_header>.size)
-        }
-                
+
+        let headerSize = is64bit ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        let cmdOffset = offset + UInt64(headerSize)
+
+        // 用 machOData 做空间检查（避免读文件不一致）
         if !isSpaceEnough(header: header, offset: Int(cmdOffset), is64bit: is64bit) {
             Logger(.error, "No space for adding command")
             return false
         }
-        
+
         Logger(.info, "Space check passed, writing...")
-        
+
+        guard let fileHandle = FileHandle(forWritingAtPath: binaryPath) else {
+            Logger(.error, "Failed to create handler for binary file")
+            return false
+        }
+
+        defer {
+            try? fileHandle.close()
+        }
+
+        var dylibCmd = dylib_command()
         dylibCmd.cmd = UInt32(LC_LOAD_DYLIB)
         dylibCmd.cmdsize = UInt32(cmdSize)
         dylibCmd.dylib.name = lc_str(offset: UInt32(MemoryLayout<dylib_command>.size))
-        
+
+        // 写 dylib 命令（追加到现有 load commands 后）
         try? fileHandle.seek(toOffset: cmdOffset + UInt64(header.sizeofcmds))
         fileHandle.write(Data(bytes: &dylibCmd, count: MemoryLayout<dylib_command>.size))
         fileHandle.write(dylibPath.data(using: .utf8)!)
-        
+
+        // 更新 mach header 的 ncmds / sizeofcmds
         var newHeader = header
         newHeader.ncmds = newHeader.ncmds + 1
         newHeader.sizeofcmds = newHeader.sizeofcmds + UInt32(cmdSize)
         try? fileHandle.seek(toOffset: offset)
-        fileHandle.write(Data(bytes: &newHeader, count: MemoryLayout<mach_header>.size))
-        
-        try? fileHandle.close()
-        
+        fileHandle.write(Data(bytes: &newHeader, count: headerSize))
+
         Logger(.info, "Injection complete")
         return true
     }

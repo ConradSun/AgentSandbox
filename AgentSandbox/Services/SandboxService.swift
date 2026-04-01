@@ -24,12 +24,11 @@ class SandboxService {
     /// - Parameter app: 沙箱应用对象
     func injectAndLaunch(app: SandboxApp) async throws {
         if app.isInSandbox, let sandboxPath = app.sandboxPath {
-            app.status = .injecting
             try await launchExisting(sandboxPath: sandboxPath, app: app)
             return
         }
 
-        app.status = .injecting
+        await updateAppStatus(app, status: .injecting, pid: nil)
 
         guard DiskManager.shared.isMounted || DiskManager.shared.mount() else {
             throw SandboxError.diskError
@@ -171,8 +170,7 @@ class SandboxService {
         }
 
         guard kill(pid, 0) == 0 else {
-            app.status = .failed
-            app.pid = nil
+            await updateAppStatus(app, status: .failed, pid: nil)
             Logger(.error, "Process pid:\(pid) never started")
             return
         }
@@ -181,9 +179,19 @@ class SandboxService {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        app.status = .stopped
-        app.pid = nil
+        await updateAppStatus(app, status: .stopped, pid: nil)
         Logger(.info, "Process pid:\(pid) exited")
+    }
+
+    /// 在 MainActor 上更新 app 状态
+    /// - Parameters:
+    ///   - app: 沙箱应用对象
+    ///   - status: 新状态
+    ///   - pid: 新进程 ID（传 nil 则不更新）
+    @MainActor
+    private func updateAppStatus(_ app: SandboxApp, status: SandboxApp.Status, pid: Int32?) {
+        app.status = status
+        app.pid = pid
     }
 }
 
