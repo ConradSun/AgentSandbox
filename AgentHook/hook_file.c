@@ -1,151 +1,289 @@
 /*
  * hook_file.c
- * AgentSandbox - 文件操作 Hook
+ * AgentHook - 文件系统调用 Hook
  *
- * 通过 DYLD_INTERPOSE 拦截文件系统调用，记录审计事件。
+ * 通过 DYLD_INTERPOSE 拦截文件操作，实现沙箱重定向：
+ *   - 读取：沙箱有则重定向，无则读原文件
+ *   - 写入/修改：沙箱无则先拷贝，再重定向
+ *   - 删除：移动到沙箱回收站
+ *
+ * 递归防护：
+ *   - IS_INSIDE_CALL guard：send_event 调用的 hook 函数内部 bypass 时设置
+ *   - path_utils.h 的 _stat/_open 等：内部通过 dlsym(__stat/__open) 获取原始
+ *     libc 实现，绕过 DYLD_INTERPOSE，不触发 hook 递归
  *
  * Created by ConradSun on 2025/3/31.
  */
 
-#include "common.h"
+/* 在引入 CoreFoundation 链之前引入 stdio.h，避免 Darwin Foundation module 覆盖 rename */
+#include <stdio.h>
+
+#include "path_utils.h"
+#include "hook_common.h"
 #include "socket_client.h"
 
-#include <stdio.h>
 #include <stdarg.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/fcntl.h>
+#include <libproc.h>
+
+/* ============================================================================
+ * 审计事件
+ * ============================================================================ */
+
+static inline void audit_event(const char *op, const char *path)
+{
+    record_file_event(op, path);
+}
+
+/* ============================================================================
+ * 自身进程检测
+ * ============================================================================ */
+
+static int is_self_process(void)
+{
+    static int checked = 0;
+    static int is_self = 0;
+    if (checked) return is_self;
+    checked = 1;
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(getpid(), path, sizeof(path)) <= 0) return 0;
+    if (strstr(path, "AgentSandbox.app")) is_self = 1;
+    return is_self;
+}
+
+/* ============================================================================
+ * 辅助函数
+ * ============================================================================ */
+
+static inline bool is_write_mode(int flags)
+{
+    return (flags & O_WRONLY) || (flags & O_RDWR);
+}
+
+static int file_exists(const char *path)
+{
+    if (!path) return 0;
+    struct stat st;
+    return _stat(path, &st) == 0;
+}
+
+static int prepare_for_write(const char *orig_path, const char *sbox_path)
+{
+    if (file_exists(sbox_path)) return 0;
+    if (!file_exists(orig_path)) return 0;
+    return copy_file_to_sandbox(orig_path, sbox_path);
+}
+
+static int prepare_for_create(const char *sbox_path)
+{
+    return ensure_parent_directory_exists(sbox_path);
+}
+
+static int move_to_trash(const char *orig_path)
+{
+    char trash_buf[PATH_MAX];
+    if (!trash_path(orig_path, trash_buf, sizeof(trash_buf))) return -1;
+    if (ensure_directory_exists(SANDBOX_TRASH_PATH) != 0) return -1;
+    int r = _rename(orig_path, trash_buf);
+    if (r == 0) return 0;
+    if (errno == EXDEV) {
+        if (copy_file_to_sandbox(orig_path, trash_buf) != 0) {
+            _unlink(orig_path);
+            return 0;
+        }
+    }
+    return -1;
+}
 
 /* ============================================================================
  * Hook 函数
  * ============================================================================ */
 
-/*
- * hook_open
- * 拦截 open() 系统调用
- *
- * @param path  文件路径
- * @param flags 打开标志
- * @return 原始 open() 的返回值
- */
 static int hook_open(const char *path, int flags, ...)
 {
-    record_file_event("open", path);
-    va_list args;
-    va_start(args, flags);
-    mode_t mode = va_arg(args, int);
-    va_end(args);
-    return open(path, flags, mode);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL()) {
+        va_list a; va_start(a, flags);
+        mode_t mode = va_arg(a, int);
+        va_end(a);
+        return _open(path, flags, mode);
+    }
+
+    va_list a; va_start(a, flags);
+    mode_t mode = va_arg(a, int);
+    va_end(a);
+
+    audit_event("open", path);
+
+    if (!is_user_protected_path(path))
+        return _open(path, flags, mode);
+
+    char sbox_path[PATH_MAX];
+    if (!sandboxize_path(path, sbox_path, sizeof(sbox_path)))
+        return _open(path, flags, mode);
+
+    if (flags & O_CREAT)
+        prepare_for_create(sbox_path);
+    else if (is_write_mode(flags))
+        prepare_for_write(path, sbox_path);
+    else if (!file_exists(sbox_path))
+        return _open(path, flags, mode);
+
+    return _open(sbox_path, flags, mode);
 }
 
-/*
- * hook_creat
- * 拦截 creat() 系统调用
- *
- * @param path 文件路径
- * @param mode 文件权限
- * @return 原始 creat() 的返回值
- */
 static int hook_creat(const char *path, mode_t mode)
 {
-    record_file_event("creat", path);
-    return creat(path, mode);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _open(path, O_CREAT | O_WRONLY | O_TRUNC, mode);
+
+    audit_event("creat", path);
+
+    if (!is_user_protected_path(path))
+        return _open(path, O_CREAT | O_WRONLY | O_TRUNC, mode);
+
+    char sbox_path[PATH_MAX];
+    if (!sandboxize_path(path, sbox_path, sizeof(sbox_path)))
+        return _open(path, O_CREAT | O_WRONLY | O_TRUNC, mode);
+
+    prepare_for_create(sbox_path);
+    return _open(sbox_path, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
-/*
- * hook_stat
- * 拦截 stat() 系统调用
- *
- * @param path 文件路径
- * @param buf  stat 结构体指针
- * @return 原始 stat() 的返回值
- */
 static int hook_stat(const char *path, struct stat *buf)
 {
-    record_file_event("stat", path);
-    return stat(path, buf);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _stat(path, buf);
+
+    audit_event("stat", path);
+
+    if (!is_user_protected_path(path))
+        return _stat(path, buf);
+
+    char sbox_path[PATH_MAX];
+    if (!sandboxize_path(path, sbox_path, sizeof(sbox_path)))
+        return _stat(path, buf);
+
+    return _stat(file_exists(sbox_path) ? sbox_path : path, buf);
 }
 
-/*
- * hook_lstat
- * 拦截 lstat() 系统调用
- *
- * @param path 文件路径
- * @param buf  stat 结构体指针
- * @return 原始 lstat() 的返回值
- */
 static int hook_lstat(const char *path, struct stat *buf)
 {
-    record_file_event("lstat", path);
-    return lstat(path, buf);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _lstat(path, buf);
+
+    audit_event("lstat", path);
+
+    if (!is_user_protected_path(path))
+        return _lstat(path, buf);
+
+    char sbox_path[PATH_MAX];
+    if (!sandboxize_path(path, sbox_path, sizeof(sbox_path)))
+        return _lstat(path, buf);
+
+    return _lstat(file_exists(sbox_path) ? sbox_path : path, buf);
 }
 
-/*
- * hook_access
- * 拦截 access() 系统调用
- *
- * @param path 文件路径
- * @param mode 访问模式
- * @return 原始 access() 的返回值
- */
 static int hook_access(const char *path, int mode)
 {
-    record_file_event("access", path);
-    return access(path, mode);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _access(path, mode);
+
+    audit_event("access", path);
+
+    if (!is_user_protected_path(path))
+        return _access(path, mode);
+
+    char sbox_path[PATH_MAX];
+    if (!sandboxize_path(path, sbox_path, sizeof(sbox_path)))
+        return _access(path, mode);
+
+    return _access(file_exists(sbox_path) ? sbox_path : path, mode);
 }
 
-/*
- * hook_unlink
- * 拦截 unlink() 系统调用
- *
- * @param path 文件路径
- * @return 原始 unlink() 的返回值
- */
 static int hook_unlink(const char *path)
 {
-    record_file_event("unlink", path);
-    return unlink(path);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _unlink(path);
+
+    audit_event("unlink", path);
+
+    if (!is_user_protected_path(path))
+        return _unlink(path);
+
+    int r = move_to_trash(path);
+    if (r == 0) return 0;
+    return _unlink(path);
 }
 
-/*
- * hook_mkdir
- * 拦截 mkdir() 系统调用
- *
- * @param path 目录路径
- * @param mode 目录权限
- * @return 原始 mkdir() 的返回值
- */
 static int hook_mkdir(const char *path, mode_t mode)
 {
-    record_file_event("mkdir", path);
-    return mkdir(path, mode);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _mkdir(path, mode);
+
+    audit_event("mkdir", path);
+
+    if (!is_user_protected_path(path))
+        return _mkdir(path, mode);
+
+    char sbox_path[PATH_MAX];
+    if (!sandboxize_path(path, sbox_path, sizeof(sbox_path)))
+        return _mkdir(path, mode);
+
+    prepare_for_create(sbox_path);
+    return _mkdir(sbox_path, mode);
 }
 
-/*
- * hook_rmdir
- * 拦截 rmdir() 系统调用
- *
- * @param path 目录路径
- * @return 原始 rmdir() 的返回值
- */
 static int hook_rmdir(const char *path)
 {
-    record_file_event("rmdir", path);
-    return rmdir(path);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _rmdir(path);
+
+    audit_event("rmdir", path);
+
+    if (!is_user_protected_path(path))
+        return _rmdir(path);
+
+    int r = move_to_trash(path);
+    if (r == 0) return 0;
+    return _rmdir(path);
 }
 
-/*
- * hook_rename
- * 拦截 rename() 系统调用
- *
- * @param oldpath 原文件路径
- * @param newpath 新文件路径
- * @return 原始 rename() 的返回值
- */
 static int hook_rename(const char *oldpath, const char *newpath)
 {
-    record_file_event("rename", oldpath);
-    return rename(oldpath, newpath);
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _rename(oldpath, newpath);
+
+    audit_event("rename", oldpath);
+
+    char old_sbox[PATH_MAX], new_sbox[PATH_MAX];
+    const char *src = oldpath;
+    const char *dst = newpath;
+
+    if (is_user_protected_path(oldpath) &&
+        sandboxize_path(oldpath, old_sbox, sizeof(old_sbox))) {
+        if (file_exists(old_sbox))
+            src = old_sbox;
+    }
+
+    if (is_user_protected_path(newpath) &&
+        sandboxize_path(newpath, new_sbox, sizeof(new_sbox))) {
+        prepare_for_create(new_sbox);
+        dst = new_sbox;
+    }
+
+    return _rename(src, dst);
 }
 
 /* ============================================================================

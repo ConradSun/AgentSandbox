@@ -31,7 +31,10 @@ class DiskManager: @unchecked Sendable {
     var logsDir: URL?  { diskPath?.appendingPathComponent("Logs") }
 
     private init() {
-        checkAndMount()
+        // 启动时主动挂载磁盘，确保扫描到沙箱内已有应用
+        if !mount() {
+            Logger(.error, "Failed to mount sandbox disk at startup")
+        }
     }
 
     // MARK: - Public
@@ -39,6 +42,16 @@ class DiskManager: @unchecked Sendable {
     /// 挂载沙箱磁盘，不存在则先创建
     @discardableResult
     func mount() -> Bool {
+        // volume 已存在（上次已挂载），直接复用
+        let volumePath = URL(fileURLWithPath: "\(DiskConfig.volumesPath)/\(diskName)")
+        if fileManager.fileExists(atPath: volumePath.path) {
+            diskPath = volumePath
+            isMounted = true
+            createDirectoryStructure()
+            Logger(.info, "Disk already mounted: \(volumePath.path)")
+            return true
+        }
+
         guard let dmgPath = getDMGPath() else {
             Logger(.error, "Failed to get DMG path")
             return false
@@ -99,15 +112,6 @@ class DiskManager: @unchecked Sendable {
     }
 
     // MARK: - Private
-
-    /// 检查并挂载已存在的沙箱磁盘
-    private func checkAndMount() {
-        let volumePath = URL(fileURLWithPath: "\(DiskConfig.volumesPath)/\(diskName)")
-        if fileManager.fileExists(atPath: volumePath.path) {
-            diskPath = volumePath
-            isMounted = true
-        }
-    }
 
     /// 获取 DMG 文件路径
     /// - Returns: DMG 文件路径，如果无法获取应用支持目录则返回 nil

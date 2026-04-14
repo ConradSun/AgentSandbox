@@ -27,6 +27,29 @@
 #define SANDBOX_SEND_TIMEOUT 10
 
 /* ============================================================================
+ * 沙箱域路径配置
+ * ============================================================================ */
+
+/* 沙箱根目录 */
+#define SANDBOX_ROOT_PATH       "/Volumes/AgentSandbox"
+
+/* 文件重定向目录 */
+#define SANDBOX_FILES_PATH      SANDBOX_ROOT_PATH "/Files"
+
+/* 二进制重定向目录 */
+#define SANDBOX_BINARIES_PATH    SANDBOX_ROOT_PATH "/Binaries"
+
+/* 回收站目录 */
+#define SANDBOX_TRASH_PATH      SANDBOX_ROOT_PATH "/Trash"
+
+/* 用户目录前缀（需要保护的区域） */
+#define SANDBOX_USER_PREFIX     "/Users/"
+
+/* 系统二进制目录前缀（不需要重定向） */
+#define SANDBOX_SYSTEM_USR_PATH "/usr/"
+#define SANDBOX_SYSTEM_BIN_PATH "/bin/"
+
+/* ============================================================================
  * 事件类型定义
  * ============================================================================ */
 
@@ -38,22 +61,5 @@
 
 /* 进程操作事件 */
 #define SANDBOX_EVENT_PROCESS "PROCESS"
-
-/* ============================================================================
- * DYLD_INTERPOSE 宏
- * ============================================================================ */
-
-/*
- * DYLD_INTERPOSE
- * 替换系统函数的宏，用于 dylib 注入时拦截系统调用
- */
-#define DYLD_INTERPOSE(_new, _old) \
-    __attribute__((used)) \
-    static struct { const void *r; const void *o; } \
-    _interpose_##_old \
-    __attribute__((section("__DATA,__interpose"))) = { \
-        (const void *)(unsigned long)&_new, \
-        (const void *)(unsigned long)&_old  \
-    };
 
 #endif /* AGENT_SANDBOX_COMMON_H */
