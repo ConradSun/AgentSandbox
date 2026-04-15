@@ -19,6 +19,7 @@ class DiskManager: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let diskName = "AgentSandbox"
     private let diskSizeGB = 10
+    private let lock = NSLock()
 
     private(set) var diskPath: URL?
     private(set) var isMounted = false
@@ -30,10 +31,21 @@ class DiskManager: @unchecked Sendable {
     /// 沙箱内日志目录
     var logsDir: URL?  { diskPath?.appendingPathComponent("Logs") }
 
+    /// 挂载完成通知
+    static let didMountNotification = Notification.Name("DiskManagerDidMount")
+
     private init() {
-        // 启动时主动挂载磁盘，确保扫描到沙箱内已有应用
-        if !mount() {
-            Logger(.error, "Failed to mount sandbox disk at startup")
+        // 后台挂载，不阻塞 App 启动
+        DispatchQueue.global(qos: .utility).async { [self] in
+            if mount() {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: Self.didMountNotification,
+                        object: self,
+                        userInfo: ["diskPath": self.diskPath as Any]
+                    )
+                }
+            }
         }
     }
 
@@ -42,6 +54,9 @@ class DiskManager: @unchecked Sendable {
     /// 挂载沙箱磁盘，不存在则先创建
     @discardableResult
     func mount() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
         // volume 已存在（上次已挂载），直接复用
         let volumePath = URL(fileURLWithPath: "\(DiskConfig.volumesPath)/\(diskName)")
         if fileManager.fileExists(atPath: volumePath.path) {
@@ -84,6 +99,9 @@ class DiskManager: @unchecked Sendable {
     /// 卸载沙箱磁盘
     @discardableResult
     func unmount() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
         guard isMounted, let path = diskPath else { return true }
 
         let task = Process()
@@ -114,7 +132,6 @@ class DiskManager: @unchecked Sendable {
     // MARK: - Private
 
     /// 获取 DMG 文件路径
-    /// - Returns: DMG 文件路径，如果无法获取应用支持目录则返回 nil
     private func getDMGPath() -> URL? {
         guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             Logger(.error, "Failed to get Application Support directory")
@@ -124,8 +141,6 @@ class DiskManager: @unchecked Sendable {
     }
 
     /// 创建 Sparse DMG 文件
-    /// - Parameter path: DMG 文件路径
-    /// - Returns: 是否成功创建
     private func createSparseDMG(at path: URL) -> Bool {
         let parentDir = path.deletingLastPathComponent()
         do {
@@ -134,7 +149,7 @@ class DiskManager: @unchecked Sendable {
             Logger(.error, "Failed to create parent directory: \(error)")
             return false
         }
-        
+
         do {
             try fileManager.removeItem(at: path)
         } catch {

@@ -18,25 +18,47 @@ class LogViewModel: ObservableObject {
     @Published var filterType: AuditLog.LogType?
     /// 搜索文本
     @Published var searchText = ""
+    /// 缓存的过滤结果
+    @Published var filteredLogs: [AuditLog] = []
 
     /// pid -> 进程名缓存
     private var processNameCache: [Int32: String] = [:]
+    /// 过滤脏标记
+    private var filterDirty = true
+    /// 过滤缓存取消订阅
+    private var cancellables = Set<AnyCancellable>()
 
-    /// 过滤后的日志列表
-    var filteredLogs: [AuditLog] {
-        var result = logs
-        if let type = filterType {
-            result = result.filter { $0.type == type }
-        }
-        if !searchText.isEmpty {
-            let lower = searchText.lowercased()
-            result = result.filter {
-                $0.operation.localizedLowercase.contains(lower) ||
-                ($0.path?.localizedLowercase.contains(lower) ?? false) ||
-                $0.processName.localizedLowercase.contains(lower)
+    init() {
+        // 任一过滤条件变化时标记需要重算
+        $logs
+            .sink { [weak self] _ in self?.filterDirty = true }
+            .store(in: &cancellables)
+        $filterType
+            .sink { [weak self] _ in self?.filterDirty = true }
+            .store(in: &cancellables)
+        $searchText
+            .sink { [weak self] _ in self?.filterDirty = true }
+            .store(in: &cancellables)
+    }
+
+    /// 获取过滤后的日志（惰性计算，脏时才重算）
+    func getFilteredLogs() -> [AuditLog] {
+        if filterDirty {
+            var result = logs
+            if let type = filterType {
+                result = result.filter { $0.type == type }
             }
+            if !searchText.isEmpty {
+                let lower = searchText.lowercased()
+                result = result.filter {
+                    $0.operation.localizedLowercase.contains(lower) ||
+                    ($0.path?.localizedLowercase.contains(lower) ?? false)
+                }
+            }
+            filteredLogs = result
+            filterDirty = false
         }
-        return result
+        return filteredLogs
     }
 
     // MARK: - Public
@@ -96,7 +118,12 @@ class LogViewModel: ObservableObject {
                 let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
                 let output = String(data: outputData, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                name = output.isEmpty ? "pid:\(pid)" : output
+                // ps -o comm= 可能返回完整路径，只取最后一段作为进程名
+                if output.isEmpty {
+                    name = "pid:\(pid)"
+                } else {
+                    name = URL(fileURLWithPath: output).deletingPathExtension().lastPathComponent
+                }
             } catch {
                 name = "pid:\(pid)"
             }

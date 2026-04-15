@@ -16,9 +16,26 @@ class SandboxViewModel: ObservableObject {
     @Published var apps: [SandboxApp] = []
     /// 最后一次错误信息
     @Published var lastError: String?
+    /// 磁盘是否已挂载（用于 UI 显示加载状态）
+    @Published var isDiskReady = false
+
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
-        scanSandboxApps()
+        // 监听磁盘挂载完成事件
+        NotificationCenter.default.publisher(for: DiskManager.didMountNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.isDiskReady = true
+                self?.scanSandboxApps()
+            }
+            .store(in: &cancellables)
+
+        // 如果磁盘已经在运行（如开发时热重载），直接扫描
+        if DiskManager.shared.isMounted {
+            isDiskReady = true
+            scanSandboxApps()
+        }
     }
 
     // MARK: - Public
@@ -73,24 +90,17 @@ class SandboxViewModel: ObservableObject {
 
     // MARK: - Private
 
-    /// 检查进程是否正在运行
-    /// - Parameter pid: 进程 ID
-    /// - Returns: 进程是否正在运行
-    private func isProcessRunning(_ pid: Int32) -> Bool {
-        guard pid > 0 else { return false }
-        return kill(pid, 0) == 0 && errno != ESRCH
-    }
-
     /// 扫描沙箱磁盘中已有的应用
     private func scanSandboxApps() {
-        guard DiskManager.shared.isMounted, let appsDir = DiskManager.shared.appsDir else { return }
+        guard let appsDir = DiskManager.shared.appsDir else { return }
 
         let contents = try? FileManager.default.contentsOfDirectory(at: appsDir, includingPropertiesForKeys: nil)
         for url in contents ?? [] where url.pathExtension == "app" {
             let name = url.deletingPathExtension().lastPathComponent
             let icon = NSWorkspace.shared.icon(forFile: url.path)
             let app = SandboxApp(name: name, bundlePath: nil, sandboxPath: url, icon: icon)
-            app.status = isProcessRunning(app.pid ?? -1) ? .running : .stopped
+            // 启动时无法可靠判断旧 PID 是否仍属于此应用，统一标记为 stopped
+            app.status = .stopped
             apps.append(app)
         }
     }

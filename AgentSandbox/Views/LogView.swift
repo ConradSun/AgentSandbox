@@ -7,6 +7,15 @@
 
 import SwiftUI
 
+/// 日志视图列宽配置（表头与行共享）
+private enum LogColumn {
+    static let typeWidth: CGFloat = 50
+    static let timeWidth: CGFloat = 70
+    static let pidWidth: CGFloat = 50
+    static let processWidth: CGFloat = 100
+    static let opWidth: CGFloat = 70
+}
+
 /// 审计日志视图：搜索过滤 + 实时滚动列表
 struct LogView: View {
     @EnvironmentObject var vm: LogViewModel
@@ -31,7 +40,7 @@ struct LogView: View {
 
                 Spacer()
 
-                Text(String(localized: "\(vm.filteredLogs.count) logs"))
+                Text(String(localized: "\(vm.getFilteredLogs().count) logs"))
                     .foregroundColor(.secondary)
 
                 Button(action: { vm.clear() }) {
@@ -46,7 +55,7 @@ struct LogView: View {
             Divider()
 
             // Log list
-            if vm.filteredLogs.isEmpty {
+            if vm.getFilteredLogs().isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "doc.text.magnifyingglass")
                         .font(.system(size: 48))
@@ -59,23 +68,25 @@ struct LogView: View {
                 // 表头
                 HStack(spacing: 8) {
                     Text("Type")
-                        .frame(width: 16)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: LogColumn.typeWidth, alignment: .leading)
                     Text("Time")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .frame(width: 70, alignment: .leading)
+                        .frame(width: LogColumn.timeWidth, alignment: .leading)
                     Text("PID")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .frame(width: 50, alignment: .trailing)
+                        .frame(width: LogColumn.pidWidth, alignment: .trailing)
                     Text("Process")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .frame(width: 100, alignment: .leading)
+                        .frame(width: LogColumn.processWidth, alignment: .leading)
                     Text("Operation")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .frame(width: 60, alignment: .leading)
+                        .frame(width: LogColumn.opWidth, alignment: .leading)
                     Text("Detail")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
@@ -90,7 +101,7 @@ struct LogView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 2) {
-                            ForEach(vm.filteredLogs) { log in
+                            ForEach(vm.getFilteredLogs()) { log in
                                 LogRowView(log: log, processName: vm.getProcessName(pid: log.processId))
                                     .id(log.id)
                             }
@@ -118,37 +129,49 @@ struct LogRowView: View {
     /// 进程名称
     let processName: String
 
+    /// 全局共享的时间格式化器，避免每行重建
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
     var body: some View {
         HStack(spacing: 8) {
-            // Type icon
-            Image(systemName: log.type.icon)
-                .font(.caption)
-                .foregroundColor(typeColor)
-                .frame(width: 16)
+            // Type icon + label
+            HStack(spacing: 4) {
+                Image(systemName: log.type.icon)
+                    .font(.caption)
+                    .foregroundColor(typeColor)
+                Text(log.type.localizedString)
+                    .font(.system(size: 10))
+                    .foregroundColor(typeColor)
+            }
+            .frame(width: LogColumn.typeWidth, alignment: .leading)
 
             // Time
             Text(formatTime(log.timestamp))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.secondary)
-                .frame(width: 70, alignment: .leading)
+                .frame(width: LogColumn.timeWidth, alignment: .leading)
 
             // PID
             Text("\(log.processId)")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.secondary)
-                .frame(width: 50, alignment: .trailing)
+                .frame(width: LogColumn.pidWidth, alignment: .trailing)
 
             // Process Name
             Text(processName)
                 .font(.system(size: 11))
                 .foregroundColor(.primary)
                 .lineLimit(1)
-                .frame(width: 100, alignment: .leading)
+                .frame(width: LogColumn.processWidth, alignment: .leading)
 
             // Operation
             Text(log.operation)
                 .font(.system(size: 12, weight: .medium))
-                .frame(width: 60, alignment: .leading)
+                .frame(width: LogColumn.opWidth, alignment: .leading)
 
             // Path/Detail
             Text(log.path ?? log.detail ?? "")
@@ -178,9 +201,7 @@ struct LogRowView: View {
     /// - Parameter date: 日期
     /// - Returns: 格式化后的时间字符串
     func formatTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+        Self.timeFormatter.string(from: date)
     }
 }
 

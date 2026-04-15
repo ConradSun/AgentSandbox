@@ -22,6 +22,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <libgen.h>
+#include <copyfile.h>
 
 /* ============================================================================
  * 原始函数指针（绕过 interpose）
@@ -94,21 +95,20 @@ static bool str_starts_with(const char *str, const char *prefix)
 static char *get_basename(const char *path)
 {
     if (!path) return NULL;
-    char *copy = strdup(path);
-    if (!copy) return NULL;
-    char *result = strdup(basename(copy));
-    free(copy);
-    return result;
+    /* basename 可能修改参数，用栈上副本避免堆分配 */
+    char copy[PATH_MAX];
+    strncpy(copy, path, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+    return strdup(basename(copy));
 }
 
 static char *get_dirname(const char *path)
 {
     if (!path) return NULL;
-    char *copy = strdup(path);
-    if (!copy) return NULL;
-    char *result = strdup(dirname(copy));
-    free(copy);
-    return result;
+    char copy[PATH_MAX];
+    strncpy(copy, path, sizeof(copy) - 1);
+    copy[sizeof(copy) - 1] = '\0';
+    return strdup(dirname(copy));
 }
 
 /* ============================================================================
@@ -194,6 +194,11 @@ int copy_file_to_sandbox(const char *src_path, const char *dst_path)
     if (!src_path || !dst_path) return -1;
     if (ensure_parent_directory_exists(dst_path) != 0) return -1;
 
+    /* macOS copyfile() — 内核级拷贝，保留元数据，比 read/write 循环快得多 */
+    if (copyfile(src_path, dst_path, NULL, COPYFILE_DATA | COPYFILE_STAT) == 0)
+        return 0;
+
+    /* fallback: copyfile 失败时（如跨卷），退回 read/write */
     int src_fd = _open(src_path, O_RDONLY, 0);
     if (src_fd < 0) return -1;
 
@@ -201,10 +206,10 @@ int copy_file_to_sandbox(const char *src_path, const char *dst_path)
     int sr = raw_stat ? raw_stat(src_path, &st) : stat(src_path, &st);
     if (sr < 0) { _close(src_fd); return -1; }
 
-    int dst_fd = _open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode);
+    int dst_fd = _open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, (int)st.st_mode);
     if (dst_fd < 0) { _close(src_fd); return -1; }
 
-    char buf[8192];
+    char buf[65536];  /* 64KB，比 8KB 减少系统调用次数 */
     ssize_t nr;
     while ((nr = read(src_fd, buf, sizeof(buf))) > 0) {
         ssize_t nw = 0;

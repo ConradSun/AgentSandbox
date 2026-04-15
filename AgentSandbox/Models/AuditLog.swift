@@ -14,8 +14,6 @@ struct AuditLog: Identifiable {
     let timestamp: Date
     /// 进程 ID
     let processId: Int32
-    /// 进程名称
-    let processName: String
     /// 日志类型（文件、网络、进程）
     let type: LogType
     /// 操作类型

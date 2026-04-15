@@ -135,14 +135,18 @@ class SocketServer: @unchecked Sendable {
 
         while isRunning {
             var readFds = fd_set()
-            withUnsafeMutableBytes(of: &readFds) { ptr in
-                ptr.initializeMemory(as: UInt32.self, repeating: 0)
-                if let base = ptr.baseAddress {
-                    base.assumingMemoryBound(to: UInt32.self)[0] = UInt32(clientFd)
+            var timeout = timeval(tv_sec: 1, tv_usec: 0)
+
+            // 手动清零 + 设置 fd 位（Swift 无法直接用 FD_ZERO/FD_SET 宏）
+            withUnsafeMutablePointer(to: &readFds) { ptr in
+                memset(ptr, 0, MemoryLayout<fd_set>.size)
+                ptr.withMemoryRebound(to: Int32.self, capacity: MemoryLayout<fd_set>.size / MemoryLayout<Int32>.size) { fdsPtr in
+                    let word = Int(clientFd / 32)
+                    let bit = Int32(1 << (clientFd % 32))
+                    fdsPtr[word] |= bit
                 }
             }
 
-            var timeout = timeval(tv_sec: 1, tv_usec: 0)
             let ret = select(clientFd + 1, &readFds, nil, nil, &timeout)
             if ret <= 0 { continue }
 

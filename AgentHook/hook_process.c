@@ -23,7 +23,12 @@
  */
 int hook_execve(const char *path, char *const argv[], char *const envp[])
 {
+    hook_init_guard();
+    if (IS_INSIDE_CALL()) return execve(path, argv, envp);
+
+    ENTER_INSIDE_CALL();
     record_proc_event("execve", path);
+    EXIT_INSIDE_CALL();
     return execve(path, argv, envp);
 }
 
@@ -35,7 +40,12 @@ int hook_posix_spawn(pid_t *pid, const char *path,
                      const posix_spawnattr_t *attrp,
                      char *const argv[], char *const envp[])
 {
+    hook_init_guard();
+    if (IS_INSIDE_CALL()) return posix_spawn(pid, path, file_actions, attrp, argv, envp);
+
+    ENTER_INSIDE_CALL();
     record_proc_event("posix_spawn", path);
+    EXIT_INSIDE_CALL();
     return posix_spawn(pid, path, file_actions, attrp, argv, envp);
 }
 
@@ -44,7 +54,12 @@ int hook_posix_spawn(pid_t *pid, const char *path,
  */
 pid_t hook_fork(void)
 {
+    hook_init_guard();
+    if (IS_INSIDE_CALL()) return fork();
+
+    ENTER_INSIDE_CALL();
     record_proc_event("fork", NULL);
+    EXIT_INSIDE_CALL();
     return fork();
 }
 

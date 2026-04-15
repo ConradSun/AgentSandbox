@@ -28,7 +28,7 @@ class SandboxService {
             return
         }
 
-        await updateAppStatus(app, status: .injecting, pid: nil)
+        updateAppStatus(app, status: .injecting, pid: nil)
 
         guard DiskManager.shared.isMounted || DiskManager.shared.mount() else {
             throw SandboxError.diskError
@@ -54,6 +54,7 @@ class SandboxService {
 
         let pid = try await launch(execPath: execPath)
         app.sandboxPath = sandboxAppPath
+        app.expectedExecPath = execPath
         app.pid = pid
         app.status = .running
 
@@ -64,6 +65,12 @@ class SandboxService {
     /// - Parameter app: 沙箱应用对象
     func stopApp(_ app: SandboxApp) {
         guard let pid = app.pid else { return }
+        guard isSameProcess(pid: pid, execPath: app.expectedExecPath) else {
+            Logger(.warning, "PID \(pid) no longer belongs to \(app.name), skipping kill")
+            app.status = .stopped
+            app.pid = nil
+            return
+        }
         kill(pid, SIGTERM)
         app.status = .stopped
         app.pid = nil
@@ -90,6 +97,7 @@ class SandboxService {
         }
         let execPath = try getExecutablePath(from: sandboxPath)
         let pid = try await launch(execPath: execPath)
+        app.expectedExecPath = execPath
         app.pid = pid
         app.status = .running
         Task { await self.watchProcess(pid: pid, app: app) }
@@ -169,18 +177,36 @@ class SandboxService {
             if kill(pid, 0) == 0 { break }
         }
 
-        guard kill(pid, 0) == 0 else {
-            await updateAppStatus(app, status: .failed, pid: nil)
-            Logger(.error, "Process pid:\(pid) never started")
+        guard isSameProcess(pid: pid, execPath: app.expectedExecPath) else {
+            updateAppStatus(app, status: .failed, pid: nil)
+            Logger(.error, "Process pid:\(pid) never started or PID recycled")
             return
         }
 
-        while kill(pid, 0) == 0 {
+        while isSameProcess(pid: pid, execPath: app.expectedExecPath) {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        await updateAppStatus(app, status: .stopped, pid: nil)
+        updateAppStatus(app, status: .stopped, pid: nil)
         Logger(.info, "Process pid:\(pid) exited")
+    }
+
+    /// 校验 PID 对应的进程是否仍是原始应用（防止 PID 回收误杀）
+    /// - Parameters:
+    ///   - pid: 进程 ID
+    ///   - execPath: 期望的可执行文件路径
+    /// - Returns: 是否为同一进程
+    private func isSameProcess(pid: Int32, execPath: String?) -> Bool {
+        guard pid > 0, let expectedPath = execPath else { return false }
+        guard kill(pid, 0) == 0 else { return false }  // 进程不存在
+
+        let bufSize = 4 * 1024  // PROC_PIDPATHINFO_MAXSIZE = 4*MAXPATHLEN
+        var pathBuf = [CChar](repeating: 0, count: bufSize)
+        let len = proc_pidpath(pid, &pathBuf, UInt32(bufSize))
+        guard len > 0 else { return false }
+
+        let actualPath = String(decoding: pathBuf.prefix(Int(len)).map { UInt8($0) }, as: UTF8.self)
+        return actualPath == expectedPath
     }
 
     /// 在 MainActor 上更新 app 状态

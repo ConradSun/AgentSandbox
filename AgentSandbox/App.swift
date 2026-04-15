@@ -32,7 +32,6 @@ struct AgentSandboxApp: App {
             let log = AuditLog(
                 timestamp: Date(timeIntervalSince1970: timestamp),
                 processId: pid,
-                processName: "",
                 type: logType,
                 operation: operation,
                 path: detail,

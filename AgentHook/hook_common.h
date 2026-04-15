@@ -42,12 +42,19 @@
  * ============================================================================ */
 
 extern pthread_key_t g_inside_call_key;
-extern int g_guard_inited;
+extern volatile int g_guard_inited;
+
+static void _init_guard_key(void)
+{
+    pthread_key_create(&g_inside_call_key, NULL);
+    __sync_synchronize();  /* 确保 key 写入对其他线程可见 */
+}
 
 static inline void hook_init_guard(void)
 {
-    if (!g_guard_inited) {
-        pthread_key_create(&g_inside_call_key, NULL);
+    if (__builtin_expect(!g_guard_inited, 0)) {
+        static pthread_once_t once = PTHREAD_ONCE_INIT;
+        pthread_once(&once, _init_guard_key);
         g_guard_inited = 1;
     }
 }

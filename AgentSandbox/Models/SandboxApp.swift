@@ -24,6 +24,8 @@ class SandboxApp: ObservableObject, Identifiable, @unchecked Sendable {
     @Published var status: Status = .pending
     /// 应用进程 ID
     @Published var pid: Int32?
+    /// 启动时的可执行文件路径（用于校验 PID 是否被回收）
+    var expectedExecPath: String?
 
     /// 应用是否已在沙箱中
     var isInSandbox: Bool { sandboxPath != nil }
