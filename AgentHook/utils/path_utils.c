@@ -15,9 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include <sys/fcntl.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -38,40 +40,55 @@ typedef int (*raw_open_fn_t)(const char *, int, int);
 typedef int (*raw_close_fn_t)(int);
 typedef int (*raw_unlink_fn_t)(const char *);
 typedef int (*raw_rename_fn_t)(const char *, const char *);
+typedef int (*raw_renameat_fn_t)(int, const char *, int, const char *);
+typedef int (*raw_renamex_np_fn_t)(const char *, const char *, unsigned int);
+typedef int (*raw_renameatx_np_fn_t)(int, const char *, int, const char *, unsigned int);
+typedef int (*raw_exchangedata_fn_t)(const char *, const char *, unsigned long);
+typedef int (*raw_copyfile_fn_t)(const char *, const char *, copyfile_state_t, copyfile_flags_t);
 
-static raw_stat_fn_t   raw_stat   = NULL;
-static raw_stat_fn_t  raw_lstat  = NULL;
-static raw_mkdir_fn_t raw_mkdir  = NULL;
-static raw_rmdir_fn_t raw_rmdir  = NULL;
-static raw_access_fn_t raw_access = NULL;
-static raw_open_fn_t  raw_open   = NULL;
-static raw_close_fn_t raw_close  = NULL;
-static raw_unlink_fn_t raw_unlink = NULL;
-static raw_rename_fn_t raw_rename = NULL;
+static raw_stat_fn_t         raw_stat   = NULL;
+static raw_stat_fn_t         raw_lstat  = NULL;
+static raw_mkdir_fn_t        raw_mkdir  = NULL;
+static raw_rmdir_fn_t        raw_rmdir  = NULL;
+static raw_access_fn_t       raw_access = NULL;
+static raw_open_fn_t         raw_open   = NULL;
+static raw_close_fn_t        raw_close  = NULL;
+static raw_unlink_fn_t       raw_unlink = NULL;
+static raw_rename_fn_t       raw_rename = NULL;
+static raw_renameat_fn_t     raw_renameat = NULL;
+static raw_renamex_np_fn_t   raw_renamex_np = NULL;
+static raw_renameatx_np_fn_t raw_renameatx_np = NULL;
+static raw_exchangedata_fn_t raw_exchangedata = NULL;
+static raw_copyfile_fn_t     raw_copyfile = NULL;
 
 __attribute__((constructor(100)))
 static void init_raw_funcs(void)
 {
     void *libc = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOLOAD);
     if (!libc) return;
-    raw_stat   = (raw_stat_fn_t)   dlsym(libc, "__stat");
-    raw_lstat  = (raw_stat_fn_t)   dlsym(libc, "__lstat");
-    raw_mkdir  = (raw_mkdir_fn_t)  dlsym(libc, "__mkdir");
-    raw_rmdir  = (raw_rmdir_fn_t)  dlsym(libc, "__rmdir");
-    raw_access = (raw_access_fn_t)  dlsym(libc, "__access");
-    raw_open   = (raw_open_fn_t)   dlsym(libc, "__open");   /* fd + flags + mode */
-    raw_close  = (raw_close_fn_t)  dlsym(libc, "close");
-    raw_unlink = (raw_unlink_fn_t)  dlsym(libc, "__unlink");
-    raw_rename = (raw_rename_fn_t)  dlsym(libc, "__rename");
+    raw_stat     = (raw_stat_fn_t)        dlsym(libc, "__stat");
+    raw_lstat    = (raw_stat_fn_t)        dlsym(libc, "__lstat");
+    raw_mkdir    = (raw_mkdir_fn_t)       dlsym(libc, "__mkdir");
+    raw_rmdir    = (raw_rmdir_fn_t)       dlsym(libc, "__rmdir");
+    raw_access   = (raw_access_fn_t)      dlsym(libc, "__access");
+    raw_open     = (raw_open_fn_t)        dlsym(libc, "__open");   /* fd + flags + mode */
+    raw_close    = (raw_close_fn_t)       dlsym(libc, "__close");
+    raw_unlink   = (raw_unlink_fn_t)      dlsym(libc, "__unlink");
+    raw_rename   = (raw_rename_fn_t)      dlsym(libc, "__rename");
+    raw_renameat      = (raw_renameat_fn_t)     dlsym(libc, "__renameat");
+    raw_renamex_np   = (raw_renamex_np_fn_t)   dlsym(libc, "__renamex_np");
+    raw_renameatx_np = (raw_renameatx_np_fn_t) dlsym(libc, "__renameatx_np");
+    raw_exchangedata = (raw_exchangedata_fn_t) dlsym(libc, "__exchangedata");
+    raw_copyfile     = (raw_copyfile_fn_t)     dlsym(libc, "__copyfile");
     dlclose(libc);
 }
 
 /* 安全包装：使用 int fd + int flags + int mode 签名（与 __open 对齐） */
 int  _stat(const char *p, struct stat *s)    { return raw_stat   ? raw_stat(p, s)    : stat(p, s); }
 int  _lstat(const char *p, struct stat *s)   { return raw_lstat  ? raw_lstat(p, s)   : lstat(p, s); }
-int  _access(const char *p, int m)           { return raw_access ? raw_access(p, m) : access(p, m); }
+int  _access(const char *p, int m)           { return raw_access ? raw_access(p, m)  : access(p, m); }
 int  _mkdir(const char *p, mode_t m)         { return raw_mkdir  ? raw_mkdir(p, m)   : mkdir(p, m); }
-int  _rmdir(const char *p)                  { return raw_rmdir  ? raw_rmdir(p)       : rmdir(p); }
+int  _rmdir(const char *p)                   { return raw_rmdir  ? raw_rmdir(p)      : rmdir(p); }
 int  _open(const char *p, int f, ...) {
     va_list a; va_start(a, f);
     int mode = va_arg(a, int);
@@ -79,8 +96,19 @@ int  _open(const char *p, int f, ...) {
     return raw_open ? raw_open(p, f, mode) : open(p, f, mode);
 }
 int  _close(int fd)                          { return raw_close  ? raw_close(fd)     : close(fd); }
-int  _unlink(const char *p)                  { return raw_unlink ? raw_unlink(p)    : unlink(p); }
-int  _rename(const char *o, const char *n)   { return raw_rename ? raw_rename(o, n) : rename(o, n); }
+int  _unlink(const char *p)                  { return raw_unlink ? raw_unlink(p)     : unlink(p); }
+int  _rename(const char *o, const char *n)
+    { return raw_rename       ? raw_rename(o, n)          : rename(o, n); }
+int  _renameat(int oldfd, const char *o, int newfd, const char *n)
+    { return raw_renameat     ? raw_renameat(oldfd, o, newfd, n) : renameat(oldfd, o, newfd, n); }
+int  _renamex_np(const char *f, const char *t, unsigned int fl)
+    { return raw_renamex_np   ? raw_renamex_np(f, t, fl)       : renamex_np(f, t, fl); }
+int  _renameatx_np(int ofd, const char *op, int nfd, const char *np, unsigned int fl)
+    { return raw_renameatx_np ? raw_renameatx_np(ofd, op, nfd, np, fl) : renameatx_np(ofd, op, nfd, np, fl); }
+int  _exchangedata(const char *p1, const char *p2, unsigned int o)
+    { return raw_exchangedata ? raw_exchangedata(p1, p2, o)  : exchangedata(p1, p2, o); }
+int  _copyfile(const char *s, const char *d, copyfile_state_t st, copyfile_flags_t fl)
+    { return raw_copyfile     ? raw_copyfile(s, d, st, fl)   : copyfile(s, d, st, fl); }
 
 /* ============================================================================
  * 内部工具函数

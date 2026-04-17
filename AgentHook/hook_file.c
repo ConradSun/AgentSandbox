@@ -38,6 +38,13 @@ static inline void audit_event(const char *op, const char *path)
     record_file_event(op, path);
 }
 
+static inline void audit_transfer_event(const char *op, const char *from, const char *to)
+{
+    char buf[PATH_MAX * 2];
+    snprintf(buf, sizeof(buf), "%s -> %s", from, to);
+    record_file_event(op, buf);
+}
+
 /* ============================================================================
  * 自身进程检测
  * ============================================================================ */
@@ -102,6 +109,7 @@ static int move_to_trash(const char *orig_path)
  * Hook 函数
  * ============================================================================ */
 
+/* open(2) — 打开/创建文件，沙箱接管写操作，O_CREAT/O_WRONLY/O_RDWR 时预建目录 */
 static int hook_open(const char *path, int flags, ...)
 {
     hook_init_guard();
@@ -135,6 +143,7 @@ static int hook_open(const char *path, int flags, ...)
     return _open(sbox_path, flags, mode);
 }
 
+/* creat(2) — 创建文件，等价于 open(path, O_CREAT|O_WRONLY|O_TRUNC, mode) */
 static int hook_creat(const char *path, mode_t mode)
 {
     hook_init_guard();
@@ -154,6 +163,7 @@ static int hook_creat(const char *path, mode_t mode)
     return _open(sbox_path, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
+/* stat(2) — 获取文件状态，优先查沙箱 */
 static int hook_stat(const char *path, struct stat *buf)
 {
     hook_init_guard();
@@ -172,6 +182,7 @@ static int hook_stat(const char *path, struct stat *buf)
     return _stat(file_exists(sbox_path) ? sbox_path : path, buf);
 }
 
+/* lstat(2) — 获取符号链接本身状态，不追踪软链，沙箱优先 */
 static int hook_lstat(const char *path, struct stat *buf)
 {
     hook_init_guard();
@@ -190,6 +201,7 @@ static int hook_lstat(const char *path, struct stat *buf)
     return _lstat(file_exists(sbox_path) ? sbox_path : path, buf);
 }
 
+/* access(2) — 检查调用进程对文件的访问权限，沙箱优先 */
 static int hook_access(const char *path, int mode)
 {
     hook_init_guard();
@@ -208,6 +220,7 @@ static int hook_access(const char *path, int mode)
     return _access(file_exists(sbox_path) ? sbox_path : path, mode);
 }
 
+/* unlink(2) — 删除文件，沙箱内移至回收站 */
 static int hook_unlink(const char *path)
 {
     hook_init_guard();
@@ -224,6 +237,7 @@ static int hook_unlink(const char *path)
     return _unlink(path);
 }
 
+/* mkdir(2) — 创建目录，沙箱优先 */
 static int hook_mkdir(const char *path, mode_t mode)
 {
     hook_init_guard();
@@ -243,6 +257,7 @@ static int hook_mkdir(const char *path, mode_t mode)
     return _mkdir(sbox_path, mode);
 }
 
+/* rmdir(2) — 删除空目录，沙箱内移至回收站 */
 static int hook_rmdir(const char *path)
 {
     hook_init_guard();
@@ -259,26 +274,27 @@ static int hook_rmdir(const char *path)
     return _rmdir(path);
 }
 
-static int hook_rename(const char *oldpath, const char *newpath)
+/* rename(2) — 重命名/移动文件，沙箱接管写入端，目标目录预创建 */
+static int hook_rename(const char *from, const char *to)
 {
     hook_init_guard();
     if (is_self_process() || IS_INSIDE_CALL())
-        return _rename(oldpath, newpath);
+        return _rename(from, to);
 
-    audit_event("rename", oldpath);
+    audit_transfer_event("rename", from, to);
 
     char old_sbox[PATH_MAX], new_sbox[PATH_MAX];
-    const char *src = oldpath;
-    const char *dst = newpath;
+    const char *src = from;
+    const char *dst = to;
 
-    if (is_user_protected_path(oldpath) &&
-        sandboxize_path(oldpath, old_sbox, sizeof(old_sbox))) {
+    if (is_user_protected_path(from) &&
+        sandboxize_path(from, old_sbox, sizeof(old_sbox))) {
         if (file_exists(old_sbox))
             src = old_sbox;
     }
 
-    if (is_user_protected_path(newpath) &&
-        sandboxize_path(newpath, new_sbox, sizeof(new_sbox))) {
+    if (is_user_protected_path(to) &&
+        sandboxize_path(to, new_sbox, sizeof(new_sbox))) {
         prepare_for_create(new_sbox);
         dst = new_sbox;
     }
@@ -286,16 +302,165 @@ static int hook_rename(const char *oldpath, const char *newpath)
     return _rename(src, dst);
 }
 
+/* renamex_np(2) — rename + flags，macOS 扩展，沙箱接管写入端 */
+static int hook_renamex_np(const char *from, const char *to, unsigned int flags)
+{
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _renamex_np(from, to, flags);
+
+    audit_transfer_event("renamex_np", from, to);
+
+    char from_box[PATH_MAX], to_box[PATH_MAX];
+    const char *src = from;
+    const char *dst = to;
+
+    if (is_user_protected_path(from) &&
+        sandboxize_path(from, from_box, sizeof(from_box))) {
+        if (file_exists(from_box))
+            src = from_box;
+    }
+
+    if (is_user_protected_path(to) &&
+        sandboxize_path(to, to_box, sizeof(to_box))) {
+        prepare_for_create(to_box);
+        dst = to_box;
+    }
+
+    return _renamex_np(src, dst, flags);
+}
+
+/* renameat(2) — POSIX 标准，oldpath/newpath 相对于 oldfd/newfd */
+static int hook_renameat(int oldfd, const char *oldpath,
+                         int newfd, const char *newpath)
+{
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _renameat(oldfd, oldpath, newfd, newpath);
+
+    audit_transfer_event("renameat", oldpath, newpath);
+
+    char old_buf[PATH_MAX], new_buf[PATH_MAX];
+    const char *src = oldpath;
+    const char *dst = newpath;
+
+    if (is_user_protected_path(oldpath) &&
+        sandboxize_path(oldpath, old_buf, sizeof(old_buf))) {
+        if (file_exists(old_buf))
+            src = old_buf;
+    }
+
+    if (is_user_protected_path(newpath) &&
+        sandboxize_path(newpath, new_buf, sizeof(new_buf))) {
+        prepare_for_create(new_buf);
+        dst = new_buf;
+    }
+
+    return _renameat(AT_FDCWD, src, AT_FDCWD, dst);
+}
+
+/* renameatx_np(2) — renameat + flags，macOS 核心文件操作常用 */
+static int hook_renameatx_np(int oldfd, const char *oldpath,
+                             int newfd, const char *newpath, unsigned int flags)
+{
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _renameatx_np(oldfd, oldpath, newfd, newpath, flags);
+
+    audit_transfer_event("renameatx_np", oldpath, newpath);
+
+    char old_buf[PATH_MAX], new_buf[PATH_MAX];
+    const char *src = oldpath;
+    const char *dst = newpath;
+
+    if (is_user_protected_path(oldpath) &&
+        sandboxize_path(oldpath, old_buf, sizeof(old_buf))) {
+        if (file_exists(old_buf))
+            src = old_buf;
+    }
+
+    if (is_user_protected_path(newpath) &&
+        sandboxize_path(newpath, new_buf, sizeof(new_buf))) {
+        prepare_for_create(new_buf);
+        dst = new_buf;
+    }
+
+    return _renameatx_np(AT_FDCWD, src, AT_FDCWD, dst, flags);
+}
+
+/* exchangedata(2) — macOS 原子交换两个文件的属性和数据 */
+static int hook_exchangedata(const char *path1, const char *path2, unsigned int options)
+{
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _exchangedata(path1, path2, options);
+
+    audit_transfer_event("exchangedata", path1, path2);
+
+    char buf1[PATH_MAX], buf2[PATH_MAX];
+    const char *p1 = path1;
+    const char *p2 = path2;
+
+    if (is_user_protected_path(path1) &&
+        sandboxize_path(path1, buf1, sizeof(buf1))) {
+        if (file_exists(buf1))
+            p1 = buf1;
+    }
+
+    if (is_user_protected_path(path2) &&
+        sandboxize_path(path2, buf2, sizeof(buf2))) {
+        if (file_exists(buf2))
+            p2 = buf2;
+    }
+
+    return _exchangedata(p1, p2, options);
+}
+
+/* copyfile(3) — 完整文件内容（含属性）复制 */
+static int hook_copyfile(const char *src, const char *dst,
+                         copyfile_state_t state, copyfile_flags_t flags)
+{
+    hook_init_guard();
+    if (is_self_process() || IS_INSIDE_CALL())
+        return _copyfile(src, dst, state, flags);
+
+    audit_transfer_event("copyfile", src, dst);
+
+    char src_buf[PATH_MAX], dst_buf[PATH_MAX];
+    const char *src_path = src;
+    const char *dst_path = dst;
+
+    if (is_user_protected_path(src) &&
+        sandboxize_path(src, src_buf, sizeof(src_buf))) {
+        if (file_exists(src_buf))
+            src_path = src_buf;
+    }
+
+    if (is_user_protected_path(dst) &&
+        sandboxize_path(dst, dst_buf, sizeof(dst_buf))) {
+        prepare_for_create(dst_buf);
+        dst_path = dst_buf;
+    }
+
+    return _copyfile(src_path, dst_path, state, flags);
+}
+
+
 /* ============================================================================
  * DYLD_INTERPOSE 注册
  * ============================================================================ */
 
-DYLD_INTERPOSE(hook_open,   open)
-DYLD_INTERPOSE(hook_creat,  creat)
-DYLD_INTERPOSE(hook_stat,   stat)
-DYLD_INTERPOSE(hook_lstat,  lstat)
-DYLD_INTERPOSE(hook_access, access)
-DYLD_INTERPOSE(hook_unlink, unlink)
-DYLD_INTERPOSE(hook_mkdir,  mkdir)
-DYLD_INTERPOSE(hook_rmdir,  rmdir)
-DYLD_INTERPOSE(hook_rename, rename)
+DYLD_INTERPOSE(hook_open,         open)
+DYLD_INTERPOSE(hook_creat,        creat)
+DYLD_INTERPOSE(hook_stat,         stat)
+DYLD_INTERPOSE(hook_lstat,        lstat)
+DYLD_INTERPOSE(hook_access,       access)
+DYLD_INTERPOSE(hook_unlink,       unlink)
+DYLD_INTERPOSE(hook_mkdir,        mkdir)
+DYLD_INTERPOSE(hook_rmdir,        rmdir)
+DYLD_INTERPOSE(hook_rename,       rename)
+DYLD_INTERPOSE(hook_renameat,     renameat)
+DYLD_INTERPOSE(hook_renamex_np,   renamex_np)
+DYLD_INTERPOSE(hook_renameatx_np, renameatx_np)
+DYLD_INTERPOSE(hook_exchangedata, exchangedata)
+DYLD_INTERPOSE(hook_copyfile,     copyfile)

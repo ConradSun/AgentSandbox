@@ -11,8 +11,11 @@
 #include "common.h"
 
 #include <stdbool.h>
-#include <sys/stat.h>
+#include <stddef.h>
 #include <stdarg.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <copyfile.h>
 
 /* ============================================================================
  * 路径判断
@@ -53,5 +56,10 @@ int  _open(const char *path, int flags, ...);
 int  _close(int fd);
 int  _unlink(const char *path);
 int  _rename(const char *oldpath, const char *newpath);
+int  _renameat(int oldfd, const char *oldpath, int newfd, const char *newpath);
+int  _renamex_np(const char *from, const char *to, unsigned int flags);
+int  _renameatx_np(int oldfd, const char *oldpath, int newfd, const char *newpath, unsigned int flags);
+int  _exchangedata(const char *path1, const char *path2, unsigned int options);
+int  _copyfile(const char *src, const char *dst, copyfile_state_t state, copyfile_flags_t flags);
 
 #endif /* PATH_UTILS_H */
